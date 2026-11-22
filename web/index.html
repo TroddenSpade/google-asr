@@ -1,0 +1,153 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Voice Typing ASR</title>
+  <meta name="description" content="Persian speech-to-text with Google's speech service, live or from audio files.">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='16' fill='%238ab4f8'/%3E%3Cpath d='M32 38a6 6 0 0 0 6-6V18a6 6 0 1 0-12 0v14a6 6 0 0 0 6 6Zm10-6a10 10 0 0 1-20 0h-4a14 14 0 0 0 12 13.8V52h4v-6.2A14 14 0 0 0 46 32h-4Z' fill='%230b0f17'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div class="app">
+    <header class="topbar">
+      <div class="brand">
+        <div class="brand-icon" aria-hidden="true">
+          <svg viewBox="0 0 24 24"><path d="M12 14a3 3 0 0 0 3-3V5a3 3 0 0 0-6 0v6a3 3 0 0 0 3 3Zm5-3a5 5 0 0 1-10 0H5a7 7 0 0 0 6 6.92V21h2v-3.08A7 7 0 0 0 19 11h-2Z"/></svg>
+        </div>
+        <div>
+          <h1>Voice Typing ASR</h1>
+          <p>Live dictation and file transcription <span class="sep">·</span> Persian by default</p>
+        </div>
+      </div>
+      <div class="backend-pill" title="FastAPI service using Google's free speech endpoint. Unofficial and free.">
+        <span class="dot"></span> FastAPI · Google speech
+      </div>
+    </header>
+
+    <nav class="tabs" role="tablist" aria-label="Mode">
+      <button class="tab is-active" data-tab="live" role="tab" aria-selected="true" aria-controls="panel-live">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 14a3 3 0 0 0 3-3V5a3 3 0 0 0-6 0v6a3 3 0 0 0 3 3Zm5-3a5 5 0 0 1-10 0H5a7 7 0 0 0 6 6.92V21h2v-3.08A7 7 0 0 0 19 11h-2Z"/></svg>
+        Live dictation
+      </button>
+      <button class="tab" data-tab="files" role="tab" aria-selected="false" aria-controls="panel-files">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v10.55A4 4 0 1 0 14 17V7h4V3h-6Z"/></svg>
+        Transcribe files
+      </button>
+    </nav>
+
+    <main>
+      <section id="panel-live" class="panel tab-panel is-active" role="tabpanel">
+        <div class="panel-head">
+          <div>
+            <h2>Live dictation</h2>
+            <p>Speak and watch the transcript appear. Choose where recognition runs.</p>
+          </div>
+          <div class="head-actions">
+            <label class="field">
+              <span>Engine</span>
+              <select id="liveEngine">
+                <option value="browser" selected>Browser (Chrome)</option>
+                <option value="server">Server (FastAPI)</option>
+              </select>
+            </label>
+            <label class="field">
+              <span>Language</span>
+              <select id="liveLang">
+                <option value="fa-IR" selected>Persian (fa-IR)</option>
+                <option value="en-US">English — US (en-US)</option>
+                <option value="en-GB">English — UK (en-GB)</option>
+                <option value="ar-SA">Arabic (ar-SA)</option>
+                <option value="tr-TR">Turkish (tr-TR)</option>
+                <option value="de-DE">German (de-DE)</option>
+                <option value="fr-FR">French (fr-FR)</option>
+                <option value="es-ES">Spanish (es-ES)</option>
+                <option value="ru-RU">Russian (ru-RU)</option>
+                <option value="hi-IN">Hindi (hi-IN)</option>
+              </select>
+            </label>
+          </div>
+        </div>
+
+        <div class="live-stage">
+          <div class="mic-orb" id="micOrb">
+            <span class="ring ring-1"></span>
+            <span class="ring ring-2"></span>
+            <button class="mic-btn" id="micBtn" aria-label="Start live dictation" aria-pressed="false">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 14a3 3 0 0 0 3-3V5a3 3 0 0 0-6 0v6a3 3 0 0 0 3 3Zm5-3a5 5 0 0 1-10 0H5a7 7 0 0 0 6 6.92V21h2v-3.08A7 7 0 0 0 19 11h-2Z"/></svg>
+            </button>
+          </div>
+          <div class="live-status" id="liveStatus">
+            <span class="status-dot"></span>
+            <span id="liveStatusText">Ready</span>
+          </div>
+          <p class="hint" id="liveHint">Click the microphone and start speaking. Browser mode uses Chrome's speech service; Server mode streams audio to this app.</p>
+        </div>
+
+        <div class="transcript-card">
+          <div class="card-head">
+            <div class="card-title">
+              Transcript
+              <span class="word-count" id="liveWordCount"></span>
+            </div>
+            <div class="actions">
+              <button class="btn small" id="liveCopy" type="button">Copy</button>
+              <button class="btn small" id="liveDownload" type="button">Download .txt</button>
+              <button class="btn small ghost" id="liveClear" type="button">Clear</button>
+            </div>
+          </div>
+          <textarea id="liveTranscript" dir="auto" spellcheck="false" placeholder="Your words will appear here…"></textarea>
+          <div class="interim" id="liveInterim" dir="auto" aria-live="polite"></div>
+        </div>
+      </section>
+
+      <section id="panel-files" class="panel tab-panel" role="tabpanel" hidden>
+        <div class="panel-head">
+          <div>
+            <h2>Transcribe files</h2>
+            <p>Drop voice recordings and get text, plus optional SRT subtitles.</p>
+          </div>
+          <div class="head-actions">
+            <label class="field">
+              <span>Language</span>
+              <select id="fileLang">
+                <option value="fa-IR" selected>Persian (fa-IR)</option>
+                <option value="en-US">English — US (en-US)</option>
+                <option value="en-GB">English — UK (en-GB)</option>
+                <option value="ar-SA">Arabic (ar-SA)</option>
+                <option value="tr-TR">Turkish (tr-TR)</option>
+                <option value="de-DE">German (de-DE)</option>
+                <option value="fr-FR">French (fr-FR)</option>
+                <option value="es-ES">Spanish (es-ES)</option>
+                <option value="ru-RU">Russian (ru-RU)</option>
+                <option value="hi-IN">Hindi (hi-IN)</option>
+              </select>
+            </label>
+            <button class="btn primary" id="transcribeBtn" type="button" disabled>Transcribe all</button>
+            <button class="btn ghost" id="clearFilesBtn" type="button" disabled>Clear</button>
+          </div>
+        </div>
+
+        <div class="drop-zone" id="dropZone" tabindex="0" role="button" aria-label="Choose audio files">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M19.35 10.04A7.49 7.49 0 0 0 12 4a7.48 7.48 0 0 0-6.64 4.04A5.994 5.994 0 0 0 0 14c0 3.31 2.69 6 6 6h13c2.76 0 5-2.24 5-5 0-2.64-2.05-4.78-4.65-4.96ZM14 13v4h-4v-4H7l5-5 5 5h-3Z"/></svg>
+          <p><strong>Drop audio files here</strong> or click to browse</p>
+          <p class="small">WAV, MP3, M4A, FLAC, OGG, OPUS, WMA, AMR, MP4 and more · up to 500 MB each</p>
+          <input type="file" id="fileInput" accept="audio/*,video/mp4,.m4a,.opus,.amr,.3gp,.wma,.flac,.ogg" multiple hidden>
+        </div>
+
+        <div class="file-list" id="fileList"></div>
+        <div class="empty" id="emptyFiles">
+          <p>No files yet. Add recordings above, then press <strong>Transcribe all</strong>.</p>
+        </div>
+      </section>
+    </main>
+
+    <footer class="footer">
+      <span>Browser mode sends mic audio to Google from Chrome; server mode sends it through this app. Nothing is stored.</span>
+      <span>Uses Google's unofficial speech endpoint: unpunctuated text, may rate-limit.</span>
+    </footer>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>

@@ -20,8 +20,14 @@
           <p>Live dictation and file transcription <span class="sep">·</span> Persian by default</p>
         </div>
       </div>
-      <div class="backend-pill" title="FastAPI service using Google's free speech endpoint. Unofficial and free.">
-        <span class="dot"></span> FastAPI · Google speech
+      <div class="topbar-actions">
+        <label class="field model-field">
+          <span>Model</span>
+          <select id="modelSelect" aria-label="ASR model"></select>
+        </label>
+        <div class="backend-pill" title="Selected model and its state.">
+          <span class="dot"></span> <span id="backendLabel">Loading models…</span>
+        </div>
       </div>
     </header>
 
@@ -44,13 +50,6 @@
             <p>Speak and watch the transcript appear. Choose where recognition runs.</p>
           </div>
           <div class="head-actions">
-            <label class="field">
-              <span>Engine</span>
-              <select id="liveEngine">
-                <option value="browser" selected>Browser (Chrome)</option>
-                <option value="server">Server (FastAPI)</option>
-              </select>
-            </label>
             <label class="field">
               <span>Language</span>
               <select id="liveLang">
@@ -81,7 +80,7 @@
             <span class="status-dot"></span>
             <span id="liveStatusText">Ready</span>
           </div>
-          <p class="hint" id="liveHint">Click the microphone and start speaking. Browser mode uses Chrome's speech service; Server mode streams audio to this app.</p>
+          <p class="hint" id="liveHint">Pick a model above, then click the microphone. Local runs tinyasr on this server; Google sends audio to the hosted endpoint; Browser uses Chrome's speech service.</p>
         </div>
 
         <div class="transcript-card">
@@ -105,7 +104,7 @@
         <div class="panel-head">
           <div>
             <h2>Transcribe files</h2>
-            <p>Drop voice recordings and get text, plus optional SRT subtitles.</p>
+            <p id="filesIntro">Drop voice recordings and get text, plus optional SRT subtitles.</p>
           </div>
           <div class="head-actions">
             <label class="field">
@@ -135,6 +134,12 @@
           <input type="file" id="fileInput" accept="audio/*,video/mp4,.m4a,.opus,.amr,.3gp,.wma,.flac,.ogg" multiple hidden>
         </div>
 
+        <div class="url-bar">
+          <input type="url" id="fileUrl" placeholder="https://example.com/audio.mp3" autocomplete="off" spellcheck="false" aria-label="Audio file URL">
+          <button class="btn" id="urlBtn" type="button">Transcribe link</button>
+        </div>
+        <p class="hint" id="urlHint">Public http(s) links, plus internal hosts allowed by the server. Private and loopback URLs are rejected otherwise.</p>
+
         <div class="file-list" id="fileList"></div>
         <div class="empty" id="emptyFiles">
           <p>No files yet. Add recordings above, then press <strong>Transcribe all</strong>.</p>
@@ -143,8 +148,8 @@
     </main>
 
     <footer class="footer">
-      <span>Browser mode sends mic audio to Google from Chrome; server mode sends it through this app. Nothing is stored.</span>
-      <span>Uses Google's unofficial speech endpoint: unpunctuated text, may rate-limit.</span>
+      <span>tinyasr and Nemotron run on this machine; Google and Browser send audio to Google. Nothing is stored.</span>
+      <span>tinyasr is punctuated; Google and Nemotron may return unpunctuated text.</span>
     </footer>
   </div>
 

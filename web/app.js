@@ -81,6 +81,120 @@
     });
   });
 
+  /* ---------- Models ---------- */
+
+  const modelSelect = $("#modelSelect");
+  const backendLabel = $("#backendLabel");
+  const filesIntro = $("#filesIntro");
+
+  const filesIntroDefault = filesIntro.textContent;
+  let models = [];
+  let modelsById = {};
+
+  const selectedModel = () => modelsById[modelSelect.value] || null;
+
+  const updateModelUi = () => {
+    const model = selectedModel();
+    if (!model) {
+      micBtn.disabled = true;
+      return;
+    }
+
+    const liveSupported =
+      model.live &&
+      model.available &&
+      (model.kind !== "client" || browserSupported);
+    const fileSupported = Boolean(model.file) && model.available;
+
+    if (!wantListening) micBtn.disabled = !liveSupported;
+    filesIntro.textContent = fileSupported
+      ? filesIntroDefault
+      : `${model.name} is live-only. Pick tinyasr or Google to transcribe files.`;
+
+    if (model.available) {
+      const languages =
+        model.languages && model.languages[0] !== "*"
+          ? ` · ${model.languages.join("/")}`
+          : "";
+      backendLabel.textContent = `${model.name}${languages}`;
+    } else {
+      backendLabel.textContent = `${model.name} · unavailable`;
+    }
+
+    defaultHint =
+      model.kind === "client"
+        ? "Browser mode uses Chrome's speech service; audio goes to Google. Live only."
+        : `${model.name}: ${model.description}.`;
+    if (!wantListening) {
+      liveHint.textContent = defaultHint;
+      liveHint.classList.remove("is-error");
+    }
+
+    renderFiles();
+  };
+
+  const loadModels = async () => {
+    modelSelect.disabled = true;
+    try {
+      const response = await fetch("/api/v1/models");
+      const payload = await response.json();
+
+      models = (payload.models || []).filter(
+        (model) => model.kind !== "client" || browserSupported
+      );
+      modelsById = Object.fromEntries(models.map((model) => [model.id, model]));
+
+      modelSelect.replaceChildren();
+      for (const model of models) {
+        const option = document.createElement("option");
+        option.value = model.id;
+        const caps = [
+          model.available ? "" : "unavailable",
+          model.file ? "file" : "",
+          model.live ? "live" : "",
+        ].filter(Boolean);
+        option.textContent = `${model.name} · ${caps.join(" + ")}`;
+        option.disabled = model.kind === "local" && !model.available;
+        modelSelect.append(option);
+      }
+
+      if (!models.length) {
+        backendLabel.textContent = "No models enabled";
+        liveHint.textContent =
+          "No ASR models are enabled in config.py. Enable one and restart the server.";
+        liveHint.classList.remove("is-error");
+        filesIntro.textContent =
+          "No ASR models are enabled in config.py. Enable one and restart the server.";
+        micBtn.disabled = true;
+        modelSelect.disabled = true;
+        fileUrl.disabled = true;
+        urlBtn.disabled = true;
+        transcribeBtn.disabled = true;
+        return;
+      }
+
+      const preferred =
+        models.find(
+          (model) => model.id === "tinyasr" && model.available && model.file
+        ) ||
+        models.find((model) => model.available && model.file && model.live) ||
+        models.find((model) => model.live);
+
+      if (preferred) modelSelect.value = preferred.id;
+      modelSelect.disabled = false;
+      updateModelUi();
+    } catch {
+      backendLabel.textContent = "Could not load models";
+      modelSelect.disabled = true;
+      micBtn.disabled = true;
+    }
+  };
+
+  modelSelect.addEventListener("change", () => {
+    if (wantListening) stopListening();
+    updateModelUi();
+  });
+
   /* ---------- Live transcription ---------- */
 
   const TARGET_RATE = 16000;
@@ -98,16 +212,13 @@
   const liveStatus = $("#liveStatus");
   const liveStatusText = $("#liveStatusText");
   const liveHint = $("#liveHint");
-  const liveEngine = $("#liveEngine");
   const liveLang = $("#liveLang");
   const liveTranscript = $("#liveTranscript");
   const liveInterim = $("#liveInterim");
   const liveWordCount = $("#liveWordCount");
 
-  const defaultHint = browserSupported
-    ? "Click the microphone and speak. Browser mode uses Chrome's speech service; Server mode streams audio to this app."
-    : "Click the microphone and speak. Audio streams to this app; microphone access needs HTTPS or localhost.";
-
+  let defaultHint =
+    "Pick a model above, then click the microphone to start.";
   let wantListening = false;
   let finalText = "";
   let restartTimer = null;
@@ -164,11 +275,13 @@
         "Microphone access was blocked. Allow it in the address bar, then try again.",
       "audio-capture": "No microphone was found. Connect one and try again.",
       "service-not-allowed":
-        "The browser blocked its speech service. Use Chrome, or switch Engine to Server.",
+        "The browser blocked its speech service. Use Chrome, or switch model.",
       "language-not-supported":
-        "The browser's speech service does not support this language. Try Server mode.",
+        "This model does not support the selected language. Pick another model or language.",
       "no-browser-asr":
-        "This browser has no speech recognition. Use Chrome, or switch Engine to Server.",
+        "This browser has no speech recognition. Pick tinyasr or Google.",
+      "no-local":
+        "The local tinyasr model is not loaded. Run `python fetch_tinyasr.py --runtime`, or pick Google.",
       insecure:
         "Live dictation needs HTTPS or localhost. Open the app on http://127.0.0.1:8765.",
       network:
@@ -332,9 +445,23 @@
     resampler = null;
   };
 
-  const stopServerEngine = () => {
-    closeSocket();
+  const stopServerEngine = (flush = false) => {
     stopCapture();
+    if (!socket) return;
+    const current = socket;
+    if (flush && current.readyState === WebSocket.OPEN) {
+      try {
+        current.send(JSON.stringify({ type: "stop" }));
+      } catch {
+        /* ignore */
+      }
+      // Give the model time to flush the open sentence, then close.
+      setTimeout(() => {
+        if (socket === current) closeSocket();
+      }, 2500);
+    } else {
+      closeSocket();
+    }
   };
 
   const handleServerMessage = (event) => {
@@ -347,11 +474,15 @@
 
     if (message.type === "ready") {
       setLiveState("listening", "Listening…");
-    } else if (message.type === "speech") {
-      liveInterim.textContent = "…";
+    } else if (message.type === "partial") {
+      liveInterim.textContent = message.text || "";
     } else if (message.type === "final") {
       liveInterim.textContent = "";
       if (message.text) appendFinal(message.text);
+    } else if (message.type === "speech") {
+      liveInterim.textContent = "…";
+    } else if (message.type === "done") {
+      closeSocket();
     } else if (message.type === "error") {
       liveHint.textContent = message.message || "Transcription failed.";
       liveHint.classList.add("is-error");
@@ -399,13 +530,13 @@
     muteNode.connect(audioContext.destination);
   };
 
-  const startServerEngine = async () => {
+  const startServerEngine = async (modelId) => {
     setLiveState("listening", "Connecting…");
 
     const protocol = location.protocol === "https:" ? "wss" : "ws";
-    const url = `${protocol}://${location.host}/api/v1/live?language=${encodeURIComponent(
-      liveLang.value
-    )}`;
+    const url = `${protocol}://${location.host}/api/v1/models/${encodeURIComponent(
+      modelId
+    )}/live?language=${encodeURIComponent(liveLang.value)}`;
 
     try {
       socket = new WebSocket(url);
@@ -450,7 +581,7 @@
     wantListening = false;
     clearTimeout(restartTimer);
     stopBrowserEngine();
-    stopServerEngine();
+    stopServerEngine(true);
     liveInterim.textContent = "";
     setLiveState("idle", "Ready");
     updateWordCount();
@@ -459,54 +590,46 @@
   const startListening = async () => {
     if (wantListening) return;
 
-    const engine = liveEngine.value;
-    if (engine === "browser" && !browserSupported) {
-      failLive("no-browser-asr");
+    const model = selectedModel();
+    if (!model) return;
+
+    if (model.kind === "client") {
+      if (!browserSupported) {
+        failLive("no-browser-asr");
+        return;
+      }
+      wantListening = true;
+      finalText = liveTranscript.value.trim();
+      startBrowserEngine();
       return;
     }
-    if (engine === "server" && !serverSupported) {
+
+    if (!serverSupported) {
       failLive(window.isSecureContext ? "audio-capture" : "insecure");
+      return;
+    }
+    if (!model.available) {
+      failLive("no-local");
+      return;
+    }
+    const base = (liveLang.value.split("-")[0] || "").toLowerCase();
+    if (
+      model.languages &&
+      model.languages[0] !== "*" &&
+      !model.languages.includes(base)
+    ) {
+      failLive("language-not-supported");
       return;
     }
 
     wantListening = true;
     finalText = liveTranscript.value.trim();
-
-    if (engine === "browser") startBrowserEngine();
-    else await startServerEngine();
+    await startServerEngine(model.id);
   };
 
-  // Disable engines this browser cannot run, and pick a sensible default.
-  if (!browserSupported) {
-    const option = liveEngine.querySelector('option[value="browser"]');
-    if (option) option.disabled = true;
-  }
-  if (!serverSupported) {
-    const option = liveEngine.querySelector('option[value="server"]');
-    if (option) option.disabled = true;
-  }
-  liveEngine.value = browserSupported ? "browser" : "server";
-
-  if (!browserSupported && !serverSupported) {
-    micBtn.disabled = true;
-    setLiveState(
-      "error",
-      "Unavailable",
-      window.isSecureContext
-        ? "This browser has no microphone support. Try Chrome."
-        : "Live dictation needs HTTPS or localhost. Open http://127.0.0.1:8765."
-    );
-  } else {
-    micBtn.addEventListener("click", () => {
-      if (wantListening) stopListening();
-      else void startListening();
-    });
-  }
-
-  liveEngine.addEventListener("change", () => {
-    if (!wantListening) return;
-    stopListening();
-    setTimeout(() => void startListening(), 300);
+  micBtn.addEventListener("click", () => {
+    if (wantListening) stopListening();
+    else void startListening();
   });
 
   liveLang.addEventListener("change", () => {
@@ -540,7 +663,7 @@
     wantListening = false;
     clearTimeout(restartTimer);
     stopBrowserEngine();
-    stopServerEngine();
+    stopServerEngine(false);
   });
 
   /* ---------- File transcription ---------- */
@@ -552,6 +675,8 @@
   const transcribeBtn = $("#transcribeBtn");
   const clearFilesBtn = $("#clearFilesBtn");
   const fileLang = $("#fileLang");
+  const fileUrl = $("#fileUrl");
+  const urlBtn = $("#urlBtn");
 
   let files = [];
   let nextId = 1;
@@ -577,6 +702,9 @@
       files.push({
         id: nextId,
         file,
+        url: "",
+        name: file.name,
+        size: file.size,
         status: "queued",
         result: null,
         error: "",
@@ -587,13 +715,68 @@
     if (added) renderFiles();
   };
 
+  const addUrl = () => {
+    const model = selectedModel();
+    if (!model || !model.file || !model.available) return;
+
+    const value = fileUrl.value.trim();
+    if (!value) return;
+    let parsed;
+    try {
+      parsed = new URL(value);
+    } catch {
+      fileUrl.setCustomValidity("Enter a valid URL.");
+      fileUrl.reportValidity();
+      return;
+    }
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+      fileUrl.setCustomValidity("Only http:// and https:// links are supported.");
+      fileUrl.reportValidity();
+      return;
+    }
+    fileUrl.setCustomValidity("");
+
+    files.push({
+      id: nextId,
+      file: null,
+      url: value,
+      name: value,
+      size: 0,
+      status: "queued",
+      result: null,
+      error: "",
+    });
+    nextId += 1;
+    fileUrl.value = "";
+    renderFiles();
+    void processQueue();
+  };
+
+  const downloadName = (entry) => {
+    if (entry.file) return baseName(entry.name);
+    try {
+      const name = new URL(entry.url).pathname.split("/").pop();
+      return baseName(name || "transcript");
+    } catch {
+      return "transcript";
+    }
+  };
+
   const renderFiles = () => {
+    const model = selectedModel();
+    const canTranscribe = Boolean(model && model.file && model.available);
+
     fileList.replaceChildren();
     emptyFiles.hidden = files.length > 0;
     clearFilesBtn.disabled = files.length === 0 || running;
     fileLang.disabled = running;
+    modelSelect.disabled = running;
+    fileUrl.disabled = running || !canTranscribe;
+    urlBtn.disabled = running || !canTranscribe;
     transcribeBtn.disabled =
-      running || !files.some((entry) => entry.status === "queued" || entry.status === "error");
+      running ||
+      !canTranscribe ||
+      !files.some((entry) => entry.status === "queued" || entry.status === "error");
     transcribeBtn.textContent = running ? "Transcribing…" : "Transcribe all";
 
     for (const entry of files) {
@@ -605,10 +788,10 @@
       icon.innerHTML = musicNoteSvg;
       const info = el("div", "file-info");
 
-      const name = el("div", "file-name", entry.file.name);
-      name.title = entry.file.name;
+      const name = el("div", "file-name", entry.name);
+      name.title = entry.name;
       const meta = el("div", "file-meta");
-      meta.append(el("span", "", formatBytes(entry.file.size)));
+      meta.append(el("span", "", entry.url ? "link" : formatBytes(entry.size)));
       meta.append(el("span", `badge ${entry.status}`, statusLabel(entry.status)));
       if (entry.result) {
         meta.append(
@@ -626,7 +809,7 @@
       remove.dataset.action = "remove";
       remove.title = "Remove";
       remove.disabled = running;
-      remove.setAttribute("aria-label", `Remove ${entry.file.name}`);
+      remove.setAttribute("aria-label", `Remove ${entry.name}`);
       row.append(icon, info, remove);
       card.append(row);
 
@@ -636,7 +819,7 @@
           el(
             "div",
             "result-meta",
-            `${formatDuration(entry.result.duration)} of audio · processed in ${entry.result.elapsed.toFixed(1)}s · ${entry.result.language}`
+            `${formatDuration(entry.result.duration)} of audio · processed in ${entry.result.elapsed.toFixed(1)}s · ${entry.result.language} · ${entry.result.model || "unknown"}`
           )
         );
 
@@ -673,12 +856,16 @@
 
   const processQueue = async () => {
     if (running) return;
+    const model = selectedModel();
+    if (!model || !model.file) return;
+
     const queue = files.filter(
       (entry) => entry.status === "queued" || entry.status === "error"
     );
     if (!queue.length) return;
 
     running = true;
+    modelSelect.disabled = true;
     renderFiles();
 
     for (const entry of queue) {
@@ -688,13 +875,17 @@
 
       try {
         const form = new FormData();
-        form.append("file", entry.file, entry.file.name);
+        if (entry.url) {
+          form.append("url", entry.url);
+        } else {
+          form.append("file", entry.file, entry.name);
+        }
         form.append("language", fileLang.value);
 
-        const response = await fetch("/api/v1/transcribe", {
-          method: "POST",
-          body: form,
-        });
+        const response = await fetch(
+          `/api/v1/models/${encodeURIComponent(model.id)}/transcribe`,
+          { method: "POST", body: form }
+        );
         let payload = null;
         try {
           payload = await response.json();
@@ -716,6 +907,7 @@
     }
 
     running = false;
+    modelSelect.disabled = false;
     renderFiles();
   };
 
@@ -774,13 +966,21 @@
       const textarea = card.querySelector("textarea");
       if (textarea) await copyFrom(textarea, button);
     } else if (action === "txt" && entry.result) {
-      download(`${baseName(entry.file.name)}.txt`, `${entry.result.text}\n`);
+      download(`${downloadName(entry)}.txt`, `${entry.result.text}\n`);
     } else if (action === "srt" && entry.result) {
-      download(`${baseName(entry.file.name)}.srt`, entry.result.srt);
+      download(`${downloadName(entry)}.srt`, entry.result.srt);
     }
   });
 
   transcribeBtn.addEventListener("click", processQueue);
+  urlBtn.addEventListener("click", addUrl);
+  fileUrl.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      addUrl();
+    }
+  });
+  fileUrl.addEventListener("input", () => fileUrl.setCustomValidity(""));
 
   clearFilesBtn.addEventListener("click", () => {
     if (running) return;
@@ -790,4 +990,5 @@
 
   updateWordCount();
   renderFiles();
+  void loadModels();
 })();

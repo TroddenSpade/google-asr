@@ -1,34 +1,36 @@
-"""Live transcription over a WebSocket.
+"""Live transcription handlers, one per server model.
 
-The browser sends raw PCM (16 kHz, mono, signed 16-bit little-endian) as
-binary frames. This module cuts the stream into utterances with a simple
-energy VAD and sends each finished utterance to the same Google speech
-endpoint the file pipeline uses.
+Both handlers assume the WebSocket is already accepted and send the same
+event protocol, so the UI does not need model-specific branches:
 
-Protocol (JSON text frames from the server):
+    {"type": "ready", "model": "...", "sample_rate": 16000,
+     "language": "fa-IR", "languages": [...], "chunk_ms": 320}
+    {"type": "partial", "text": "..."}                 not final yet
+    {"type": "final", "text": "...", "words": [...]}   committed text
+    {"type": "language", "lang": "fa"}                 language switch
+    {"type": "error", "message": "..."}
 
-    {"type": "ready", "sample_rate": 16000, "language": "fa-IR"}
-    {"type": "speech"}                                  speech started
-    {"type": "final", "text": "...", "duration": 2.4}   utterance done
-    {"type": "error", "message": "..."}                 transcription failed
+* ``run_tinyasr`` — one streaming tinyasr session per connection; the model's
+  own VAD and end-of-turn head replace the energy VAD.
+* ``run_google`` — energy VAD + the hosted endpoint, one request per utterance.
 
-The client does not need to send anything but binary audio. Closing the
-socket ends the session; nothing is stored.
+Clients send only binary PCM (16 kHz, mono, signed 16-bit little-endian).
+Nothing is stored.
 """
 
 from __future__ import annotations
 
+import json
 import math
-import re
 from array import array
 from collections import deque
 
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect
+from fastapi import WebSocket, WebSocketDisconnect
 from starlette.concurrency import run_in_threadpool
 
-from transcriber import DEFAULT_LANGUAGE, TranscriptionError, transcribe_pcm
-
-router = APIRouter()
+import asr_service
+import nemotron_client
+from transcriber import TranscriptionError, transcribe_pcm
 
 SAMPLE_RATE = 16000
 SAMPLE_WIDTH = 2
@@ -36,15 +38,13 @@ FRAME_MS = 20
 FRAME_SAMPLES = SAMPLE_RATE * FRAME_MS // 1000
 FRAME_BYTES = FRAME_SAMPLES * SAMPLE_WIDTH
 
-# 16-bit full scale is 32768; speech on a phone line sits around 1000-8000.
+# Google engine (energy VAD); tinyasr uses the model's own VAD.
 START_RMS = 400.0
 STOP_RMS = 250.0
 SILENCE_MS = 600
 PREROLL_FRAMES = 300 // FRAME_MS
 MIN_SPEECH_MS = 400
 MAX_SPEECH_MS = 20000
-
-LANGUAGE_PATTERN = re.compile(r"[a-z]{2,3}(?:-[A-Za-z]{2,4})?")
 
 
 def _rms(frame: bytes) -> float:
@@ -56,12 +56,7 @@ def _rms(frame: bytes) -> float:
 
 
 class Segmenter:
-    """Split a continuous PCM stream into utterances.
-
-    Frames before speech starts are kept as a short pre-roll so the first
-    phoneme is not clipped. An utterance ends after ``SILENCE_MS`` below
-    ``STOP_RMS``, or when it reaches ``MAX_SPEECH_MS``.
-    """
+    """Split continuous PCM into utterances for the Google engine."""
 
     def __init__(self) -> None:
         self._pending = bytearray()
@@ -71,7 +66,6 @@ class Segmenter:
         self._silence_ms = 0
 
     def feed(self, data: bytes) -> list[tuple[str, bytes | int]]:
-        """Return ``("start", ms)``, ``("end", pcm)`` and ``("empty", 0)``."""
         self._pending.extend(data)
         events: list[tuple[str, bytes | int]] = []
         while len(self._pending) >= FRAME_BYTES:
@@ -118,18 +112,186 @@ class Segmenter:
             return [("empty", 0)]
         return [("end", b"".join(speech))]
 
+    def flush(self) -> list[tuple[str, bytes | int]]:
+        """Flush an open utterance when the client stops mid-sentence."""
+        return self._finish()
 
-@router.websocket("/api/v1/live")
-async def live(websocket: WebSocket, language: str = DEFAULT_LANGUAGE) -> None:
-    if not LANGUAGE_PATTERN.fullmatch(language):
-        await websocket.close(code=1008, reason="Invalid language code")
+
+def _text(words: list[dict]) -> str:
+    return " ".join((word.get("text") or "").strip() for word in words).strip()
+
+
+async def _forward_events(websocket: WebSocket, events: list[dict]) -> None:
+    for event in events:
+        kind = event.get("type")
+        if kind == "commit":
+            words = event.get("words") or []
+            text = _text(words)
+            if text:
+                await websocket.send_json(
+                    {"type": "final", "text": text, "words": words}
+                )
+        elif kind == "partial":
+            words = (event.get("open") or []) + (event.get("tail") or [])
+            # The word times are what lets a client merge this draft with the
+            # durable file-path transcript instead of showing both: it can
+            # drop exactly the words a finished chunk already covers. Older
+            # clients ignore the extra field.
+            await websocket.send_json(
+                {"type": "partial", "text": _text(words), "words": words}
+            )
+        elif kind == "language":
+            await websocket.send_json(
+                {"type": "language", "lang": event.get("lang", "")}
+            )
+
+
+async def run_tinyasr(websocket: WebSocket, language: str) -> None:
+    engine = asr_service.get_engine()
+    if engine is None:
+        await websocket.send_json(
+            {"type": "error", "message": "tinyasr model is not available."}
+        )
         return
 
-    await websocket.accept()
-    await websocket.send_json(
-        {"type": "ready", "sample_rate": SAMPLE_RATE, "language": language}
+    session = await run_in_threadpool(
+        engine.open_session,
+        asr_service.language_code(language),
+        4,
     )
+    await websocket.send_json(
+        {
+            "type": "ready",
+            "model": "tinyasr",
+            "sample_rate": SAMPLE_RATE,
+            "language": language,
+            "chunk_ms": engine.chunk_ms,
+            "languages": engine.languages(),
+        }
+    )
+    try:
+        while True:
+            message = await websocket.receive()
+            if message["type"] == "websocket.disconnect":
+                break
 
+            data = message.get("bytes")
+            if data:
+                try:
+                    events = await run_in_threadpool(session.push, data)
+                except Exception as error:
+                    await websocket.send_json(
+                        {"type": "error", "message": f"tinyasr: {error}"}
+                    )
+                    break
+                await _forward_events(websocket, events)
+                continue
+
+            text = message.get("text")
+            if text:
+                try:
+                    command = json.loads(text)
+                except json.JSONDecodeError:
+                    continue
+                if command.get("type") == "stop":
+                    break
+    except WebSocketDisconnect:
+        pass
+    finally:
+        try:
+            events = await run_in_threadpool(session.finish)
+            await _forward_events(websocket, events)
+            await websocket.send_json({"type": "done"})
+        except Exception:
+            # The client is gone; the session is still released below.
+            pass
+        session.close()
+
+
+async def run_nemotron(websocket: WebSocket, language: str) -> None:
+    """Energy-VAD utterances, each sent to the GPU Nemotron service.
+
+    The GPU service returns one final transcript per utterance; there are no
+    partial words, because the proxy keeps the main process torch-free.
+    """
+    await websocket.send_json(
+        {
+            "type": "ready",
+            "model": "nemotron",
+            "sample_rate": SAMPLE_RATE,
+            "language": language,
+            "chunk_ms": 1145,
+            "languages": ["fa"],
+        }
+    )
+    segmenter = Segmenter()
+
+    async def emit(pcm: bytes) -> None:
+        try:
+            result = await run_in_threadpool(
+                nemotron_client.transcribe_pcm, pcm, language
+            )
+        except Exception as error:
+            await websocket.send_json(
+                {"type": "error", "message": f"nemotron: {error}"}
+            )
+            return
+        text = (result.get("text") or "").strip()
+        if text:
+            await websocket.send_json(
+                {
+                    "type": "final",
+                    "text": text,
+                    "duration": result.get("duration"),
+                }
+            )
+
+    try:
+        while True:
+            message = await websocket.receive()
+            if message["type"] == "websocket.disconnect":
+                break
+
+            data = message.get("bytes")
+            if data:
+                for kind, payload in segmenter.feed(data):
+                    if kind == "start":
+                        await websocket.send_json({"type": "speech"})
+                    elif kind == "end":
+                        assert isinstance(payload, bytes)
+                        await emit(payload)
+                continue
+
+            text = message.get("text")
+            if text:
+                try:
+                    command = json.loads(text)
+                except json.JSONDecodeError:
+                    continue
+                if command.get("type") == "stop":
+                    break
+    except WebSocketDisconnect:
+        pass
+    finally:
+        for kind, payload in segmenter.flush():
+            if kind == "end":
+                assert isinstance(payload, bytes)
+                await emit(payload)
+        try:
+            await websocket.send_json({"type": "done"})
+        except Exception:
+            pass
+
+
+async def run_google(websocket: WebSocket, language: str) -> None:
+    await websocket.send_json(
+        {
+            "type": "ready",
+            "model": "google",
+            "sample_rate": SAMPLE_RATE,
+            "language": language,
+        }
+    )
     segmenter = Segmenter()
     try:
         while True:
@@ -139,6 +301,14 @@ async def live(websocket: WebSocket, language: str = DEFAULT_LANGUAGE) -> None:
 
             data = message.get("bytes")
             if not data:
+                text = message.get("text")
+                if text:
+                    try:
+                        command = json.loads(text)
+                    except json.JSONDecodeError:
+                        continue
+                    if command.get("type") == "stop":
+                        break
                 continue
 
             for kind, payload in segmenter.feed(data):
@@ -171,3 +341,8 @@ async def live(websocket: WebSocket, language: str = DEFAULT_LANGUAGE) -> None:
                     )
     except WebSocketDisconnect:
         pass
+    finally:
+        try:
+            await websocket.send_json({"type": "done"})
+        except Exception:
+            pass

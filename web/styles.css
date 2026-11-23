@@ -110,6 +110,17 @@ input {
   padding: 0 2px;
 }
 
+.topbar-actions {
+  display: flex;
+  align-items: flex-end;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.model-field {
+  min-width: 230px;
+}
+
 .backend-pill {
   display: inline-flex;
   align-items: center;
@@ -588,6 +599,39 @@ select:focus-visible {
   transform: scale(1.005);
 }
 
+.url-bar {
+  display: flex;
+  gap: 10px;
+  margin-top: 14px;
+  flex-wrap: wrap;
+}
+
+.url-bar input {
+  flex: 1 1 320px;
+  min-width: 0;
+  padding: 10px 12px;
+  border: 1px solid var(--line-strong);
+  border-radius: 10px;
+  background: #111a29;
+  color: var(--text);
+  font-size: 13.5px;
+  outline: none;
+}
+
+.url-bar input::placeholder {
+  color: var(--faint);
+}
+
+.url-bar input:focus-visible {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px rgba(138, 180, 248, 0.18);
+}
+
+.url-bar input:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
 .file-list {
   display: flex;
   flex-direction: column;
@@ -845,6 +889,15 @@ select:focus-visible {
     font-size: 12.5px;
   }
 
+  .topbar-actions {
+    width: 100%;
+  }
+
+  .model-field {
+    width: 100%;
+    min-width: 0;
+  }
+
   .backend-pill {
     display: none;
   }
@@ -903,6 +956,14 @@ select:focus-visible {
 
   .drop-zone {
     padding: 26px 18px;
+  }
+
+  .url-bar {
+    flex-direction: column;
+  }
+
+  .url-bar .btn {
+    width: 100%;
   }
 
   .footer {
